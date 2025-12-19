@@ -1,0 +1,376 @@
+---
+title: "Analyses Pieges Pondoirs Montpellier"
+output: pdf_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, message = F, warning = F, comment = NA)
+```
+
+# Initial settings
+
+## Packages
+.
+```{r, message=F, warning=F}
+set.seed(2501)
+
+libs <- c('tidyverse', 'gam', 'readxl', 'raster', 'ggmap', 'nlme', 'sf', 'sjPlot','patchwork', 'lme4')
+invisible(lapply(libs, library, character.only = T))
+```
+
+# Data
+.
+```{r}
+
+# localisation PP
+pp <- read_excel("../donnees/suivi/BDD_TIS_PP_PRIVE_all.xlsx")
+
+pp <- pp %>%
+  dplyr::filter(nom_commune == "MONTPELLIER")
+
+pp_loc <- pp %>%
+  group_by(num_piege) %>%
+  summarise(long=mean(x, na.rm  =T), lat = mean(y, na.rm  = T))
+
+
+# Input
+df <- read_excel("../donnees/suivi/BDD_TIS_PP_PRIVE_all.xlsx") |>
+  filter(statut == 'RAS' & 
+           !(is.na(date_instal)) &
+           !(is.na(date_releve))) |> 
+  mutate(time = as.numeric(difftime(date_releve, date_instal, units = c("days")))) |> 
+  filter(time > 0) |> 
+  left_join(pp_loc) |> 
+  mutate(oeuf = as.numeric(nb_oeufs)/time) |> 
+  mutate(pose = date_instal) |> 
+  mutate(taux_fecond=as.numeric(taux_fecond)) %>%
+  mutate(steril = 1-taux_fecond)
+
+
+df.zonage <- st_read("../donnees/donnees_cartes/localisation_pp.gpkg") %>%
+  st_drop_geometry() %>%
+  mutate(num_piege = as.numeric(num_piege)) %>%
+  mutate(num_piege = paste0("PP-MALMTP-",sprintf("%03d", num_piege))) %>%
+  dplyr::select(num_piege,zone)
+
+
+# points de lâchers
+df.lach = st_read('../donnees/donnees_cartes/malbopictis_points_lacher.gpkg')
+  
+df.lach$lat = st_coordinates(df.lach)[,2]
+df.lach$long = st_coordinates(df.lach)[,1]
+
+df.lach <- st_drop_geometry(df.lach)
+
+# nb moustiques lachés
+nb_laches <- read_excel("../donnees/suivi/Donnees_lachers_Malbopictis_2025.xlsx")
+colnames(nb_laches) <- c("semaine", "nb_moustiques_laches","nb_moustiques_laches_ha","objectif_plancher")
+nb_laches$date_lacher <- as.Date(lubridate::parse_date_time(paste(2025, nb_laches$semaine, 3, sep="/"),'Y/W/w'))
+
+# Build datasets 
+df = df |> 
+  left_join(df.zonage, by = "num_piege") 
+df = df |> 
+  mutate(zonage.ord = factor(zone, levels = c('peripherie', 'centrale', 'tampon')))
+
+
+
+dd = pointDistance(df |> dplyr::select(long, lat), 
+              df.lach |> dplyr::select(long, lat), lonlat = T)
+
+df$prox = apply(dd, 1, FUN = min, na.rm = TRUE)
+
+df1 <- df %>%
+   filter(!is.na(taux_fecond)) 
+
+
+ddf = df |> 
+  filter(oeuf*time > 10 &
+           month(pose) %in% 7:10)
+
+ddfi = 
+  ddf |> 
+  group_by(num_piege,  long, lat) |> 
+  summarise(nb.oeuf = mean(oeuf, na.rm = T),
+            sterility = mean(steril, na.rm = T), nb.data = n())
+
+ddfii = 
+  ddfi |> 
+  filter(nb.data >2)
+
+```
+
+# Results 
+## General overview (confidential)
+```{r}
+
+bbox_montpellier <- c(left = min(ddfi$long)-0.002, bottom = min(ddfi$lat)-0.002, right = max(ddfi$long)+0.002, top = max(ddfi$lat)+0.002)
+
+ggmap::register_stadiamaps("46e02592-4347-4401-95bb-66873ec3a35b")
+
+map_montpellier <- get_stadiamap(bbox_montpellier, maptype = "stamen_terrain", zoom = 16)
+
+
+final_map <- ggmap(map_montpellier) +
+      geom_point(data = ddfi %>% filter(!is.na(sterility)), aes(y = lat, x = long, color = sterility, size = nb.oeuf)) +
+       geom_point(data = df.lach, aes(y = lat, x = long), color = "red", size = 0.7, shape = 4) +
+     scale_color_viridis_b()
+
+final_map2 <- ggmap(map_montpellier) +
+      geom_point(data = ddf %>% filter(!is.na(steril)), aes(y = lat, x = long, color = steril, size = oeuf)) +
+         geom_point(data = df.lach, aes(y = lat, x = long), color = "red", size = 0.7, shape = 4) +
+  facet_wrap(.~as.Date(date_releve)) +
+     scale_color_viridis_b()
+
+```
+
+## Egg counts 
+### Model
+.
+```{r}
+
+
+
+
+```
+
+### Plot
+
+```{r}
+
+p2 = df1 %>%
+  mutate(nb_oeufs_jour = as.numeric(nb_oeufs)/time, date_releve = as.Date(date_releve)) %>%
+  group_by(date_releve,zonage.ord) %>%
+  summarise(mean_nb_oeufs_jour = mean(nb_oeufs_jour), sd = sd(nb_oeufs_jour)) %>%
+  ggplot(aes(x = date_releve, y = mean_nb_oeufs_jour, color=zonage.ord)) + 
+  geom_vline(data = nb_laches, aes(xintercept = date_lacher, size = nb_moustiques_laches), colour = 'yellow', alpha = 0.5) +
+  geom_line() + 
+  geom_point() + 
+  theme_bw()+ 
+  ggtitle("Nb oeufs/jour ~ temps")
+
+p2
+
+```
+
+### Save plot
+.
+```{r, include=FALSE}
+ggsave(filename = '../plots_suivi/plot_oeufs_zone.png', plot = p2, width = 10, height = 6, units = "cm", dpi = 300, scale = 2)
+```
+
+## Sterility per zone 
+### Model
+
+.
+```{r}
+mod3 = 
+  lm(steril~zonage.ord,
+     data = df|> filter(oeuf > 20 &
+                          month(pose) %in% 7:10))
+summary(mod3)
+
+p_mod3 <- sjPlot::plot_model(mod3, show.values = TRUE, value.offset = .3, axis.lim = c(-.5,.5), vline.color = "blue", title = "taux sterilité~zonage\n(ref : zone périphérie") + theme_bw()
+```
+
+### Plot
+.
+```{r}
+
+# p4 = ggplot(data = ddf, 
+#        aes(x = date_releve, y = steril, color = zonage.ord)) +
+#   geom_point() + 
+#   geom_smooth(alpha = 0.1) +
+#   theme_bw() + 
+#   theme(legend.position = "bottom") + 
+#   ggtitle("Stérilité ~ temps")
+
+p4 <- ddf %>%
+  mutate(date_releve = as.Date(date_releve)) %>%
+  group_by(date_releve,zonage.ord) %>%
+  summarise(mean_steril = mean(steril, na.rm = T), sd = sd(steril, na.rm = T)) %>% 
+  ggplot(aes(x = date_releve, y = mean_steril, color=zonage.ord)) + 
+    geom_vline(data = nb_laches, aes(xintercept = date_lacher, size = nb_moustiques_laches), colour = 'yellow', alpha = 0.5) +
+  geom_line() + 
+  geom_point() + 
+  theme_bw()+ 
+  theme(legend.position = "bottom") +
+  ggtitle("Stérilité moyenne ~ temps")
+
+p5 <- ddf %>%
+  mutate(date_releve = as.Date(date_releve)) %>%
+  group_by(date_releve,zonage.ord) %>%
+  summarise(median_steril = median(steril, na.rm = T), sd = sd(steril, na.rm = T)) %>% 
+  ggplot(aes(x = date_releve, y = median_steril, color=zonage.ord)) + 
+    geom_vline(data = nb_laches, aes(xintercept = date_lacher, size = nb_moustiques_laches), colour = 'yellow', alpha = 0.5) +
+  geom_line() + 
+  geom_point() + 
+  theme_bw()+ 
+  theme(legend.position = "bottom") +
+  ggtitle("Stérilité médiane ~ temps")
+
+
+p6 <- ddf %>%
+  mutate(date_releve = as.Date(date_releve)) %>%
+  mutate(semaine_releve = week(date_releve)) %>%
+  group_by(semaine_releve,zonage.ord) %>%
+  summarise(mean_steril = mean(steril, na.rm = T), sd = sd(steril, na.rm = T)) %>% 
+  left_join(nb_laches, by = c("semaine_releve"="semaine")) %>%
+  mutate(sterilite_vs_effort = mean_steril/nb_moustiques_laches) %>%
+  ggplot(aes(x = semaine_releve, y = sterilite_vs_effort, color=zonage.ord)) +
+  geom_line() + 
+  geom_point() + 
+  theme_bw()+ 
+  theme(legend.position = "bottom") +
+  ggtitle("Stérilité moyenne/nb moustiques lachés ~ temps")
+
+p = p4+p5+p6+p_mod3 + plot_layout(widths = c(1,1, .5),guides = "collect") & theme(legend.position = 'bottom')
+
+```
+
+
+### Save plot
+.
+```{r, include=FALSE}
+ggsave(filename = '../plots_suivi/plot_steril_zone.png', plot = p, width = 10, height = 6, units = "cm", dpi = 300, scale = 3.5)
+```
+
+## Sterility vs effort de lacher
+
+```{r}
+
+
+
+```
+
+# Controls 
+## Sterility with distance to closest release point
+Controlling efficacy given current distance between release points
+### Model
+.
+```{r}
+
+mod2 = 
+  lm(steril~prox,
+      data = df|> filter(oeuf > 20 &
+                           month(pose) %in% 7:10))
+summary(mod2)
+
+p_mod2 <- sjPlot::plot_model(mod2, show.values = TRUE, vline.color = "blue", title = "taux sterilité~proximité\n(référence : zone périphérie") + theme_bw()
+
+```
+
+### Plot
+.
+```{r}
+
+p3 = ggplot(data = ddf |> filter(zonage.ord != "peripherie"), 
+  aes(x = prox, y = steril, color = zonage.ord)) +
+  geom_point() + 
+  geom_smooth(method = 'lm', alpha = 0.2) + 
+  theme_bw() + 
+  ggtitle("Stérilité ~ distance au point de laché le plus proche")
+
+
+```
+
+### Save plot
+.
+```{r, include=FALSE}
+ggsave(filename = '../plots_suivi/plot_steril_dist.png', plot = p3, width = 10, height = 6, units = "cm", dpi = 300, scale = 2)
+```
+
+## Sterility with number of eggs laid per day
+Controlling for outliers and for sufficiency of number of males released
+
+### Model
+
+.
+```{r}
+mod4 = 
+  lm(steril~oeuf*time,
+     data = df|> filter(zonage.ord %in% c("centrale") &
+                          month(pose) %in% 7:10))
+summary(mod4)
+
+p_mod4 <- sjPlot::plot_model(mod2, show.values = TRUE, value.offset = .3, vline.color = "blue", axis.lim = c(-.5,.5), title = "taux sterilité~oeuf*time (zone centrale") + theme_bw()
+
+```
+
+### Plot
+.
+```{r}
+p5 = ggplot(data = df |> filter(zonage.ord %in% c("centrale")) , 
+            aes(x = as.numeric(oeuf*time), y = as.numeric(steril))) +
+  geom_point() + 
+  geom_smooth() +  
+  lims(x = c(0, 400)) +
+  theme_bw() + 
+  ggtitle("Stérilité ~ nb oeufs/jour")
+
+p5
+```
+
+### Save plot
+.
+```{r, include=FALSE}
+ggsave(filename = '../plots_suivi/plot_steril_oeufs_zoneproteg.png', plot = p5, width = 10, height = 6, units = "cm", dpi = 300, scale = 2)
+```
+
+### sterilité ~ distance au centroide
+
+```{r, include=FALSE}
+
+library(units)
+
+df <- df %>%
+  st_as_sf(., coords = c("long","lat"), crs = 4326) %>%
+  mutate(date_releve = as.Date(date_releve)) %>%
+  mutate(trimester_since_release = as.period(as.Date(date_releve) - as.Date("2025-08-22")) %/% months(3)) %>%
+  mutate(month_since_release = as.period(as.Date(date_releve) - as.Date("2025-08-22")) %/% months(1))
+
+
+df.lach = st_read('../donnees/donnees_cartes/malbopictis_points_lacher.gpkg')
+
+centroid = df.lach %>%
+  st_combine() %>%
+  st_centroid()
+
+df$distance_to_centroid = st_distance(df,centroid)
+df$distance_to_centroid_class <- cut(df$distance_to_centroid, breaks=seq(0, as.numeric(max(df$distance_to_centroid)), 50))
+
+
+pp <- ggplot(df %>% filter(date_releve>as.Date("2025-08-22")), aes(x=distance_to_centroid, y = steril, color = zonage.ord)) +
+  geom_point(size =1) +
+  geom_smooth(se = F, method = 'lm', formula = y ~ x, color = "yellow", alpha = 0.5) +
+  geom_smooth(se = T, color = "black", fill = "grey", alpha = 0.2) +
+  #facet_grid(.~months_since_release) +
+  ggpmisc::stat_poly_eq(formula = y ~ x, aes(label =..p.value.label..), geom = "label", label.x = 100, label.y = 1, fill = "white",  color = "black" ) +
+  theme_bw() +
+  labs( x = "Distance to centroid", y = "Mean sterility rate") + 
+  ggtitle("Sterilité ~ distance au centroide des lâchers (post 1er lâcher)")
+
+# df %>% 
+#   filter(date_releve>as.Date("2025-08-22")) %>%
+#   group_by(distance_to_centroid_class) %>%
+#   summarise(steril = mean(steril, na.rm = T)) %>%
+#   ggplot(aes(x=distance_to_centroid_class, y = steril)) + 
+#    geom_point(size =1) + 
+#   geom_line()
+
+pp2 <- ggplot(df %>% filter(nb_oeufs>10), aes(x=distance_to_centroid, y = steril, color = zonage.ord, group = zonage.ord)) +
+    geom_point(aes(size =nb_oeufs)) +
+    geom_smooth(se = T, method = 'lm', formula = y ~ x, color = "yellow",  fill = "grey", alpha = 0.5) +
+   # geom_smooth(se = T, color = "black", fill = "grey", alpha = 0.2) +
+    facet_wrap(.~date_releve) +
+    ggpmisc::stat_poly_eq(formula = y ~ x, aes(label =..p.value.label..), geom = "label", label.x = 150, label.y = 1, fill = "white",  color = "black" ) +
+    theme_bw() +
+    labs( x = "Distance to centroid", y = "Mean sterility rate") + 
+    ggtitle("Sterilité ~ distance au centroide des lâchers (1er lâcher = 22/08/2025)") + 
+  ylim(c(0,1)) +
+  theme(legend.position="none")
+
+ggsave(filename = '../plots_suivi/plot_steril_dist_to_centroid_lacher.png', plot = pp2, width = 15, height = 8, units = "cm", dpi = 300, scale = 2)
+
+```
